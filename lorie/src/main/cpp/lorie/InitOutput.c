@@ -1244,8 +1244,10 @@ static PixmapPtr loriePixmapFromFds(ScreenPtr screen, CARD8 num_fds, const int *
 
     fail:
     // An AHB not yet handed to a LorieBuffer still belongs to this function.
-    if (receivedAhb)
-        AHardwareBuffer_release(receivedAhb);
+    if (receivedAhb) {
+        if (__builtin_available(android 26, *))
+            AHardwareBuffer_release(receivedAhb);
+    }
     if (pixmap)
         screen->DestroyPixmap(pixmap);
 
