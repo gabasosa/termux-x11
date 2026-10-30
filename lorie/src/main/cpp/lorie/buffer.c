@@ -50,6 +50,11 @@ struct LorieBuffer {
     int32_t gpuCopyPending;
 };
 
+void LorieBuffer_releaseRawAHardwareBuffer(AHardwareBuffer* buffer) {
+    if (buffer && __builtin_available(android 26, *))
+        AHardwareBuffer_release(buffer);
+}
+
 void LorieBuffer_gpuCopyPendingInc(LorieBuffer* buffer) {
     if (buffer)
         buffer->gpuCopyPending++;

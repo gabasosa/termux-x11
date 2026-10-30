@@ -63,6 +63,9 @@ LorieBuffer* _Nullable LorieBuffer_allocate(int32_t width, int32_t height, int8_
  */
 LorieBuffer* _Nullable LorieBuffer_wrapFileDescriptor(int32_t width, int32_t stride, int32_t height, int8_t format, int fd, off_t offset);
 
+/* Release a raw AHardwareBuffer reference not transferred to LorieBuffer. */
+void LorieBuffer_releaseRawAHardwareBuffer(AHardwareBuffer* _Nullable buffer);
+
 /**
  * Wraps given AHardwareBuffer into LorieBuffer.
  * Takes ownership on the given AHardwareBuffer.
