@@ -1,0 +1,42 @@
+name: Termux X11 Alignment Validation
+
+on:
+  push:
+    branches:
+      - alignment-ci
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v6.3.0
+
+      - name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Fetch pinned submodules
+        run: git submodule update --init --recursive --jobs 8 --depth 1
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug
+
+      - name: Upload standalone APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: termux-x11-alignment-validation
+          path: lorie-app/build/outputs/apk/standalone/debug/termux-x11-universal-debug.apk
+          if-no-files-found: error
+          retention-days: 7

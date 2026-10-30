@@ -19,6 +19,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <errno.h>
+#include <stdint.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
@@ -83,6 +84,14 @@ static int memfd_create(const char *name, unsigned int flags) {
     errno = ENOSYS;
 	return -1;
 #endif
+}
+
+// Linear Adreno 6xx/7xx resource layouts may access the last level in
+// four-row blocks. Pad real Android backing storage, never X11 geometry.
+static inline int32_t lorieAhbStorageHeight(int32_t logicalHeight) {
+    if (logicalHeight <= 0 || logicalHeight > INT32_MAX - 3)
+        return 0;
+    return (logicalHeight + 3) & ~3;
 }
 
 static inline size_t alignToPage(size_t size) {
@@ -172,8 +181,23 @@ static LorieBuffer* allocate(int32_t width, int32_t stride, int32_t height, int8
 
             if (__builtin_available(android 26, *))
                 AHardwareBuffer_describe(b.desc.buffer, &desc);
-            b.desc.width = (int32_t) desc.width;
-            b.desc.height = (int32_t) desc.height;
+            if (!desc.width || !desc.height || !desc.stride ||
+                desc.width > INT32_MAX || desc.height > INT32_MAX ||
+                desc.stride > INT32_MAX ||
+                (width == 0 && height == 0
+                    ? desc.stride < desc.width
+                    : width <= 0 || height <= 0 ||
+                      desc.width < (uint32_t) width ||
+                      desc.height < (uint32_t) height ||
+                      desc.stride < (uint32_t) width)) {
+                AHardwareBuffer_release(b.desc.buffer);
+                return NULL;
+            }
+            if (width == 0 && height == 0) {
+                // Legacy wrapper: external dimensions are logical.
+                b.desc.width = (int32_t) desc.width;
+                b.desc.height = (int32_t) desc.height;
+            }
             b.desc.stride = (int32_t) desc.stride;
             b.desc.format = desc.format;
             break;
@@ -211,19 +235,29 @@ __LIBC_HIDDEN__ LorieBuffer* LorieBuffer_allocate(int32_t width, int32_t height,
     size_t size = 0;
     AHardwareBuffer *ahardwarebuffer = NULL;
 
+    // Check dimensions before multiplication, and before allocating any backing.
+    if (width <= 0 || height <= 0 ||
+        (size_t) width > SIZE_MAX / sizeof(uint32_t) / (size_t) height)
+        return NULL;
+
     if (type == LORIEBUFFER_FD) {
-        size = alignToPage(width * height * sizeof(uint32_t));
+        size = alignToPage((size_t) width * (size_t) height * sizeof(uint32_t));
         fd = LorieBuffer_createRegion("LorieBuffer", size);
         if (fd < 0)
             return NULL;
     } else if (type == LORIEBUFFER_AHARDWAREBUFFER) {
-        AHardwareBuffer_Desc desc = { .width = width, .height = height, .format = format, .layers = 1,
+        int32_t storageHeight = lorieAhbStorageHeight(height);
+        if (width <= 0 || storageHeight == 0)
+            return NULL;
+        AHardwareBuffer_Desc desc = { .width = width, .height = storageHeight, .format = format, .layers = 1,
                 .usage = AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER };
         int err = -1;
         if (__builtin_available(android 26, *))
             err = AHardwareBuffer_allocate(&desc, &ahardwarebuffer);
-        if (err != 0)
-            dprintf(2, "FATAL: failed to allocate AHardwareBuffer (width %d height %d format %d): error %d\n", width, height, format, err);
+        if (err != 0) {
+            dprintf(2, "Failed to allocate AHardwareBuffer (width %d height %d format %d): error %d\n", width, storageHeight, format, err);
+            return NULL;
+        }
     }
 
     return allocate(width, width, height, format, type, ahardwarebuffer, fd, size, 0, true);
@@ -235,6 +269,14 @@ __LIBC_HIDDEN__ LorieBuffer* LorieBuffer_wrapFileDescriptor(int32_t width, int32
 
 __LIBC_HIDDEN__ LorieBuffer* LorieBuffer_wrapAHardwareBuffer(AHardwareBuffer* buffer) {
     return allocate(0, 0, 0, 0, LORIEBUFFER_AHARDWAREBUFFER, buffer, -1, 0, 0, false);
+}
+
+// Consumes the AHardwareBuffer reference on success AND failure. The X11
+// geometry is provided by the DRI3 request, independently of padded storage.
+__LIBC_HIDDEN__ LorieBuffer* LorieBuffer_wrapAHardwareBufferSized(
+        AHardwareBuffer* buffer, int32_t width, int32_t height) {
+    return allocate(width, width, height, 0, LORIEBUFFER_AHARDWAREBUFFER,
+                    buffer, -1, 0, 0, false);
 }
 
 __LIBC_HIDDEN__ void LorieBuffer_convert(LorieBuffer* buffer, int8_t type, int8_t format) {
@@ -270,26 +312,42 @@ __LIBC_HIDDEN__ void LorieBuffer_convert(LorieBuffer* buffer, int8_t type, int8_
         buffer->locked = 0;
     } else {
         AHardwareBuffer *b = NULL;
-        AHardwareBuffer_Desc desc = { .width = buffer->desc.width, .height = buffer->desc.height, .format = format, .layers = 1,
+        int32_t storageHeight = lorieAhbStorageHeight(buffer->desc.height);
+        if (storageHeight == 0)
+            return;
+        AHardwareBuffer_Desc desc = { .width = buffer->desc.width, .height = storageHeight, .format = format, .layers = 1,
                 .usage = AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER };
         int err = -1;
         if (__builtin_available(android 26, *))
             err = AHardwareBuffer_allocate(&desc, &b);
-        if (err != 0)
+        if (err != 0 || !b)
             return;
-
-        if (__builtin_available(android 26, *))
-            AHardwareBuffer_describe(b, &desc);
-
-        if (__builtin_available(android 26, *)) {
-            if (AHardwareBuffer_lock(b, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, NULL, &data) == 0) {
-                int32_t fence = -1;
-                pixman_blt(buffer->desc.data, data, buffer->desc.stride, (int) desc.stride, 32, 32, 0, 0, 0, 0, buffer->desc.width, buffer->desc.height);
-                AHardwareBuffer_unlock(b, &fence);
-                waitFence(fence);
-            }
+        AHardwareBuffer_describe(b, &desc);
+        if (!desc.width || !desc.height || !desc.stride ||
+            desc.width > INT32_MAX || desc.height > INT32_MAX ||
+            desc.stride > INT32_MAX ||
+            desc.width < (uint32_t) buffer->desc.width ||
+            desc.height < (uint32_t) storageHeight ||
+            desc.stride < (uint32_t) buffer->desc.width) {
+            AHardwareBuffer_release(b);
+            return;
         }
-
+        data = NULL;
+        if (AHardwareBuffer_lock(b, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN |
+                                  AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, NULL, &data) != 0 || !data) {
+            AHardwareBuffer_release(b);
+            return;
+        }
+        pixman_blt(buffer->desc.data, data, buffer->desc.stride, (int) desc.stride,
+                   32, 32, 0, 0, 0, 0, buffer->desc.width, buffer->desc.height);
+        int32_t fence = -1;
+        int unlockResult = AHardwareBuffer_unlock(b, &fence);
+        waitFence(fence);
+        if (unlockResult != 0) {
+            AHardwareBuffer_release(b);
+            return;
+        }
+        // Commit only after the full visible image has been copied and released.
         buffer->desc.type = type;
         buffer->desc.format = format;
         buffer->desc.stride = (int32_t) desc.stride;
@@ -331,6 +389,17 @@ __LIBC_HIDDEN__ void __LorieBuffer_free(LorieBuffer* buffer) {
     free(buffer);
 }
 
+__LIBC_HIDDEN__ int32_t LorieBuffer_textureHeight(LorieBuffer* buffer) {
+    if (!buffer)
+        return 0;
+    if (buffer->desc.type == LORIEBUFFER_AHARDWAREBUFFER && buffer->desc.buffer) {
+        AHardwareBuffer_Desc physical = {0};
+        AHardwareBuffer_describe(buffer->desc.buffer, &physical);
+        return (int32_t) physical.height;
+    }
+    return buffer->desc.height;
+}
+
 __LIBC_HIDDEN__ const LorieBuffer_Desc* LorieBuffer_description(LorieBuffer* buffer) {
     static const LorieBuffer_Desc none = {0};
     return buffer ? &buffer->desc : &none;
@@ -338,6 +407,9 @@ __LIBC_HIDDEN__ const LorieBuffer_Desc* LorieBuffer_description(LorieBuffer* buf
 
 __LIBC_HIDDEN__ int LorieBuffer_lock(LorieBuffer* buffer, void** out) {
     int ret = 0;
+    void *data = NULL;
+    if (out)
+        *out = NULL;
     if (!buffer)
         return ENODEV;
 
@@ -349,18 +421,27 @@ __LIBC_HIDDEN__ int LorieBuffer_lock(LorieBuffer* buffer, void** out) {
     }
 
     if (buffer->desc.type == LORIEBUFFER_REGULAR || buffer->desc.type == LORIEBUFFER_FD)
-        buffer->lockedData = buffer->desc.data;
+        data = buffer->desc.data;
     else if (buffer->desc.type == LORIEBUFFER_AHARDWAREBUFFER) {
         if (__builtin_available(android 26, *))
-            ret = AHardwareBuffer_lock(buffer->desc.buffer, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, NULL, &buffer->lockedData);
+            ret = AHardwareBuffer_lock(buffer->desc.buffer,
+                AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN,
+                -1, NULL, &data);
+        else
+            ret = ENOTSUP;
+    } else
+        ret = EINVAL;
+
+    if (ret != 0 || !data) {
+        buffer->lockedData = NULL;
+        buffer->locked = 0;
+        return ret ? ret : EIO;
     }
-
-    if (out)
-        *out = buffer->lockedData;
-
+    buffer->lockedData = data;
     buffer->locked = 1;
-
-    return ret;
+    if (out)
+        *out = data;
+    return 0;
 }
 
 __LIBC_HIDDEN__ int LorieBuffer_unlock(LorieBuffer* buffer) {

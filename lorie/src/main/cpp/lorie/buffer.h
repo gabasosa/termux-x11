@@ -72,6 +72,12 @@ LorieBuffer* _Nullable LorieBuffer_wrapFileDescriptor(int32_t width, int32_t str
  */
 LorieBuffer* _Nullable LorieBuffer_wrapAHardwareBuffer(AHardwareBuffer* _Nullable buffer);
 
+/** Consume an AHardwareBuffer reference and preserve supplied logical DRI3 geometry.
+ * Ownership is consumed even when construction fails.
+ */
+LorieBuffer* _Nullable LorieBuffer_wrapAHardwareBufferSized(
+    AHardwareBuffer* _Nullable buffer, int32_t width, int32_t height);
+
 /**
  * Convert regular buffer to given type.
  *
@@ -132,6 +138,9 @@ bool LorieBuffer_hasGpuCopyPending(LorieBuffer* _Nullable buffer);
  * @return reference to description
  */
 const LorieBuffer_Desc* _Nonnull LorieBuffer_description(LorieBuffer* _Nullable buffer);
+
+/** Physical GL texture height; may exceed the logical pixmap height for AHB. */
+int32_t LorieBuffer_textureHeight(LorieBuffer* _Nullable buffer);
 
 /**
  * Lock the AHardwareBuffer for direct CPU access.

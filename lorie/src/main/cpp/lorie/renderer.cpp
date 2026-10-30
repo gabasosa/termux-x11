@@ -790,7 +790,7 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
             // window's own backing pixmap); only rebind the FBO's attachment when it changes.
             if (boundDstId != entry.dstBufferId) {
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, LorieBuffer_getGLTextureId(dst), 0);
-                glViewport(0, 0, dstDesc->width, dstDesc->height);
+                glViewport(0, 0, dstDesc->width, LorieBuffer_textureHeight(dst));
                 boundDstId = entry.dstBufferId;
 
                 // Diagnostic: GLES2 has no glGetTexLevelParameteriv, so ask the AHardwareBuffer
@@ -821,15 +821,17 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
                 float x0 = 2.f * (float) (r.x1 + entry.xOff) / (float) dstDesc->width - 1.f;
                 float x1 = 2.f * (float) (r.x2 + entry.xOff) / (float) dstDesc->width - 1.f;
                 // FBO writes and on-screen draws use opposite y conventions here, unlike x.
-                float y0 = 1.f - 2.f * (float) (r.y1 + entry.yOff) / (float) dstDesc->height;
-                float y1 = 1.f - 2.f * (float) (r.y2 + entry.yOff) / (float) dstDesc->height;
+                float dstH = (float) LorieBuffer_textureHeight(dst);
+                float y0 = 1.f - 2.f * (float) (r.y1 + entry.yOff) / dstH;
+                float y1 = 1.f - 2.f * (float) (r.y2 + entry.yOff) / dstH;
                 // EGLImage-backed textures sample by logical width regardless of row stride;
                 // only our own CPU-uploaded LORIEBUFFER_FD texture is stride-wide.
                 float srcUvDivisor = srcDesc->type == LORIEBUFFER_FD ? (float) srcDesc->stride : (float) srcDesc->width;
                 float u0 = (float) r.x1 / srcUvDivisor;
                 float u1 = (float) r.x2 / srcUvDivisor;
-                float v0 = (float) r.y1 / (float) srcDesc->height;
-                float v1 = (float) r.y2 / (float) srcDesc->height;
+                float sourceTextureHeight = (float) LorieBuffer_textureHeight(src);
+                float v0 = (float) r.y1 / sourceTextureHeight;
+                float v1 = (float) r.y2 / sourceTextureHeight;
                 // Only swap channels if src/dst storage formats actually differ.
                 uint8_t needsSwizzle = LorieBuffer_isRgba(src) != LorieBuffer_isRgba(dst);
                 log("rendererApplyPendingGpuCopies: rect (%d,%d)-(%d,%d) off=(%d,%d) -> ndc=(%.3f,%.3f)-(%.3f,%.3f) uv=(%.3f,%.3f)-(%.3f,%.3f) srcTex=%u dstTex=%u swizzle=%d\n",
@@ -1018,9 +1020,9 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
     if (desc->type == LORIEBUFFER_FD)
         xfactor = (float) desc->width/(float) desc->stride;
     drawRegion(0, -1.f, -1.f, 1.f, 1.f,
-               sourceLeft / (float) desc->width * xfactor, sourceTop / (float) desc->height,
+               sourceLeft / (float) desc->width * xfactor, sourceTop / (float) LorieBuffer_textureHeight(buffer),
                (sourceLeft + sourceWidth) / (float) desc->width * xfactor,
-               (sourceTop + sourceHeight) / (float) desc->height,
+               (sourceTop + sourceHeight) / (float) LorieBuffer_textureHeight(buffer),
                LorieBuffer_isRgba(buffer));
     fence = eglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, nullptr);
     glFlush();
