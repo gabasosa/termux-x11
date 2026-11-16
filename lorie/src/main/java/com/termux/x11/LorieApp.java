@@ -136,6 +136,13 @@ public class LorieApp extends Application {
                     break;
 
                 IBinder activeService = activity != null && activity.service != null ? activity.service.asBinder() : null;
+
+                // Repeated announcements from the same X server are legitimate.
+                if (binder.equals(activeService) || binder.equals(pendingConnection)) {
+                    Log.v("LorieApp", "Ignoring duplicate ACTION_START from the same X server");
+                    break;
+                }
+
                 if ((activeService != null && activeService.isBinderAlive()) || (pendingConnection != null && pendingConnection.isBinderAlive())) {
                     try {
                         ICmdEntryInterface.Stub.asInterface(binder).reportFatalError("Termux:X11 already has an active X server connection.");
